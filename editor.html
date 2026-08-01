@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Markdown WYSIWYG Editor</title>
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    body { background:#f1f5f9; font-family:system-ui,sans-serif; margin:0 auto; max-width:1000px; padding:32px 20px; }
+    h1 { font-size:24px; }
+    .actions { display:flex; gap:8px; margin:12px 0; }
+    .actions button { border:1px solid #94a3b8; border-radius:5px; cursor:pointer; padding:7px 11px; }
+    .inspectors { display:grid; gap:18px; grid-template-columns:1fr 1fr; }
+    #output, #ast { background:#0f172a; color:#e2e8f0; max-height:360px; overflow:auto; padding:14px; }
+    #output { border:0; box-sizing:border-box; font:13px/1.45 ui-monospace,monospace; min-height:360px; resize:vertical; width:100%; }
+    #ast { font:13px/1.45 ui-monospace,monospace; }
+    #ast details { margin-left:15px; } #ast summary { cursor:pointer; color:#93c5fd; }
+    #ast .field { color:#cbd5e1; margin-left:15px; } #ast .value { color:#86efac; }
+    .clipboard-converter { margin-top:18px; }
+    #convertClipboard, #copyClipboardHtml { background:#fff; border:2px dashed #94a3b8; border-radius:7px; cursor:pointer;
+      font:inherit; padding:18px; text-align:center; width:100%; }
+    #convertClipboard:focus, #convertClipboard:hover, #copyClipboardHtml:focus, #copyClipboardHtml:hover {
+      background:#eef2ff; border-color:#6366f1; outline:none; }
+    #copyClipboardHtml { margin-top:8px; }
+    #clipboardStatus { color:#475569; margin:7px 0 0; min-height:1.5em; }
+    #preview { background:#fff; border:1px solid #cbd5e1; border-radius:7px; margin-top:18px; padding:24px; }
+    @media (max-width:750px) { .inspectors { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <h1>Markdown WYSIWYG Editor</h1>
+  <p>Click inside a block to edit it. Click its ⋮⋮ handle (or press Escape) to select the whole block.</p>
+  <div class="actions">
+    <button id="loadSample" type="button">Reload sample</button>
+  </div>
+  <markdown-wysiwyg-editor id="editor"></markdown-wysiwyg-editor>
+  <div class="inspectors">
+    <section><h2>Live Markdown</h2><textarea id="output" aria-label="Live Markdown source" spellcheck="false"></textarea></section>
+    <section><h2>Live AST</h2><div id="ast"></div></section>
+  </div>
+  <section class="clipboard-converter">
+    <h2>Clipboard HTML → Markdown</h2>
+    <button id="convertClipboard" type="button">Click to convert the clipboard, or paste here</button>
+    <button id="copyClipboardHtml" type="button">Click to convert the clipboard HTML into Text representing that HTML source</button>
+    <p id="clipboardStatus" role="status" aria-live="polite"></p>
+  </section>
+  <section><h2>Rendered Page Preview</h2><div id="preview"></div></section>
+  <script src="default_rules.js"></script>
+  <script src="htmlToMarkdown.js"></script>
+  <script src="markdown.js"></script>
+  <script src="markdown_wysiwyg_editor.js"></script>
+  <script>
+    const editor = document.querySelector('#editor');
+    const output = document.querySelector('#output');
+    const astOutput = document.querySelector('#ast');
+    const preview = document.querySelector('#preview');
+    const convertClipboard = document.querySelector('#convertClipboard');
+    const copyClipboardHtml = document.querySelector('#copyClipboardHtml');
+    const clipboardStatus = document.querySelector('#clipboardStatus');
+    const sample = `# Editable Markdown
+
+Select text and use the toolbar to apply **formatting**.
+<!-- toc -->
+---
+Use the block handle to select, copy, cut, paste, move, or delete a whole block.
+---
+1. list
+2. bok`;
+    editor.value = sample;
+    const fileAsDataUrl = file => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.addEventListener('load', () => resolve(reader.result));
+      reader.addEventListener('error', () => reject(reader.error || new Error('Could not read image.')));
+      reader.readAsDataURL(file);
+    });
+    editor.registerImageUploadHandler(fileAsDataUrl);
+    editor.registerPasteHandler(async paste => {
+      console.log('[MarkdownWysiwygEditor demo] Raw clipboard HTML:', paste.html);
+      const images = await Promise.all(paste.files
+        .filter(file => file.type.startsWith('image/'))
+        .map(async file => {
+          const name = (file.name || 'pasted image').replace(/[\[\]]/g, '');
+          return `![${name}](${await fileAsDataUrl(file)})`;
+        }));
+      const clipboardMarkdown = paste.html
+        ? HTMLToMarkdownJS.htmlToMarkdown(paste.html)
+        : paste.text;
+      const insertedMarkdown = [clipboardMarkdown, ...images].filter(Boolean).join('\n');
+      const { start, end } = paste.markdownSelection;
+      editor.value = paste.markdown.slice(0, start) + insertedMarkdown + paste.markdown.slice(end);
+      updateInspectors(editor.value);
+    });
+    function renderAstNode(node, open = false) {
+      const details = document.createElement('details');
+      details.open = open;
+      const summary = document.createElement('summary');
+      summary.textContent = `${node.type} · ${node.parseType} · ${node.children.length} children`;
+      details.append(summary);
+      for (const [name, value] of Object.entries(node.captures || {})) {
+        const field = document.createElement('div');
+        field.className = 'field';
+        field.append(`${name}: `);
+        const shown = document.createElement('span');
+        shown.className = 'value'; shown.textContent = JSON.stringify(value);
+        field.append(shown); details.append(field);
+      }
+      node.children.forEach(child => details.append(renderAstNode(child)));
+      return details;
+    }
+    function updateInspectors(markdown, ast = MarkdownJS.markdownToAST(markdown)) {
+      output.value = markdown;
+      astOutput.replaceChildren(renderAstNode(ast, true));
+      preview.innerHTML = MarkdownJS.markdownToHtml(markdown);
+    }
+    updateInspectors(editor.value);
+    editor.addEventListener('change', event => updateInspectors(event.detail.markdown, event.detail.ast));
+    document.querySelector('#loadSample').addEventListener('click', () => { editor.value = sample; updateInspectors(editor.value); });
+    output.addEventListener('input', () => {
+      editor.value = output.value;
+      const ast = MarkdownJS.markdownToAST(output.value);
+      astOutput.replaceChildren(renderAstNode(ast, true));
+      preview.innerHTML = MarkdownJS.markdownToHtml(output.value);
+    });
+
+    async function replaceClipboardWithMarkdown(html, text = '') {
+      const markdown = html ? HTMLToMarkdownJS.htmlToMarkdown(html) : text;
+      await navigator.clipboard.writeText(markdown);
+      clipboardStatus.textContent = `Copied ${markdown.length} characters of Markdown to the clipboard.`;
+    }
+
+    async function readClipboardFormats() {
+      if (!navigator.clipboard || typeof navigator.clipboard.read !== 'function') {
+        throw new Error('Clipboard reading is unavailable');
+      }
+      const items = await navigator.clipboard.read();
+      let html = '';
+      let text = '';
+      for (const item of items) {
+        if (!html && item.types.includes('text/html')) {
+          html = await (await item.getType('text/html')).text();
+        }
+        if (!text && item.types.includes('text/plain')) {
+          text = await (await item.getType('text/plain')).text();
+        }
+      }
+      return { html, text };
+    }
+
+    convertClipboard.addEventListener('click', async () => {
+      clipboardStatus.textContent = 'Reading clipboard…';
+      try {
+        const { html, text } = await readClipboardFormats();
+        await replaceClipboardWithMarkdown(html, text);
+      } catch (error) {
+        clipboardStatus.textContent = 'Clipboard reading was blocked. Focus this target and press Ctrl/⌘+V instead.';
+        convertClipboard.focus();
+      }
+    });
+
+    convertClipboard.addEventListener('paste', async event => {
+      event.preventDefault();
+      clipboardStatus.textContent = 'Converting pasted content…';
+      try {
+        await replaceClipboardWithMarkdown(
+          event.clipboardData.getData('text/html'),
+          event.clipboardData.getData('text/plain')
+        );
+      } catch (error) {
+        clipboardStatus.textContent = `Could not update the clipboard: ${error.message}`;
+      }
+    });
+
+    async function replaceClipboardWithHtmlSource(html) {
+      if (!html) throw new Error('The clipboard does not contain HTML.');
+      await navigator.clipboard.writeText(html);
+      clipboardStatus.textContent = `Copied ${html.length} characters of HTML source as plain text.`;
+    }
+
+    copyClipboardHtml.addEventListener('click', async () => {
+      clipboardStatus.textContent = 'Reading clipboard HTML…';
+      try {
+        const { html } = await readClipboardFormats();
+        await replaceClipboardWithHtmlSource(html);
+      } catch (error) {
+        clipboardStatus.textContent = error.message === 'The clipboard does not contain HTML.'
+          ? error.message
+          : 'Clipboard reading was blocked. Focus this target and press Ctrl/⌘+V instead.';
+        copyClipboardHtml.focus();
+      }
+    });
+
+    copyClipboardHtml.addEventListener('paste', async event => {
+      event.preventDefault();
+      clipboardStatus.textContent = 'Reading pasted HTML…';
+      try {
+        await replaceClipboardWithHtmlSource(event.clipboardData.getData('text/html'));
+      } catch (error) {
+        clipboardStatus.textContent = error.message;
+      }
+    });
+  </script>
+</body>
+</html>

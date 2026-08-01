@@ -1,0 +1,21 @@
+.pre-container-scroll-wrapper,
+.markdown-table-scroll-wrapper {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+
+.pre-container pre {
+  margin: 0;
+  min-width: max-content;
+}
+
+.copy-icon::before {
+  content: "#";
+}
+
+.invisible-quote,
+.fence-quote--invisible {
+  border-left: 0;
+  padding-left: 1rem;
+}

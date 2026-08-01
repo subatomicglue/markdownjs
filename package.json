@@ -1,0 +1,53 @@
+{
+  "name": "markdownjs",
+  "version": "1.0.0",
+  "description": "Data-driven Markdown parser, HTML renderer, and WYSIWYG web component.",
+  "main": "markdown.js",
+  "module": "index.mjs",
+  "exports": {
+    ".": {
+      "import": "./index.mjs",
+      "require": "./markdown.js",
+      "default": "./markdown.js"
+    },
+    "./rules": {
+      "import": "./rules.mjs",
+      "require": "./default_rules.js",
+      "default": "./default_rules.js"
+    },
+    "./editor": "./editor.mjs",
+    "./htmlToMarkdown": {
+      "import": "./htmlToMarkdown.mjs",
+      "require": "./htmlToMarkdown.js",
+      "default": "./htmlToMarkdown.js"
+    },
+    "./browser": "./dist/markdown.js",
+    "./browser/htmlToMarkdown": "./dist/htmlToMarkdown.js",
+    "./browser/editor": "./dist/markdown-editor.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/",
+    "markdown.js",
+    "htmlToMarkdown.js",
+    "default_rules.js",
+    "markdown_wysiwyg_editor.js",
+    "index.mjs",
+    "rules.mjs",
+    "editor.mjs",
+    "htmlToMarkdown.mjs",
+    "style.css",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node build.js",
+    "prepack": "npm run build && npm test",
+    "test": "node markdown_tests.js",
+    "megatest": "node markdown2html.js megatest.md"
+  },
+  "optionalDependencies": {
+    "jsdom": "^16.7.0"
+  },
+  "author": "",
+  "license": "ISC"
+}

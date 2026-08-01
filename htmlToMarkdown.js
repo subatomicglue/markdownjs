@@ -1,0 +1,566 @@
+
+
+//////////////////////////////////////////////////////////////////////////////////////
+// htmlToMarkdown
+//////////////////////////////////////////////////////////////////////////////////////
+
+'use strict';
+
+(function installHtmlToMarkdown(global) {
+
+// scoop up entire HTML DOM into a structured object tree
+// (one node per HTML element, with attributes and child nodes).
+function _parseHTMLToTree(htmlString) {
+  let document;
+  let NodeApi;
+
+  // Detect environment and parse HTML
+  if (typeof window !== 'undefined' && typeof DOMParser !== 'undefined') {
+    // Browser environment: Use DOMParser
+    const parser = new DOMParser();
+    document = parser.parseFromString(htmlString, 'text/html');
+    NodeApi = window.Node; // Use the browser's Node API
+  } else {
+    // Node.js environment: Use jsdom
+    let JSDOM;
+    try {
+      ({ JSDOM } = require('jsdom'));
+    } catch (error) {
+      throw new Error(
+        'htmlToMarkdown in Node.js requires the optional "jsdom" dependency. ' +
+        'Install it with: npm install jsdom@^16.7.0'
+      );
+    }
+    const dom = new JSDOM(htmlString);
+    document = dom.window.document;
+    NodeApi = dom.window.Node; // Use Node API from jsdom
+  }
+
+  // Function to recursively convert DOM elements into a hierarchical object tree
+  function elementToObject(element) {
+    const obj = {
+      tagName: element.tagName ? element.tagName.toLowerCase() : null,
+      attributes: {},
+      children: [],
+    };
+
+    // Collect attributes
+    if (element.attributes) {
+      for (const attr of element.attributes) {
+        obj.attributes[attr.name] = attr.value;
+      }
+    }
+
+    // Process child nodes
+    for (const child of element.childNodes) {
+      if (child.nodeType === NodeApi.ELEMENT_NODE) {
+        obj.children.push(elementToObject(child)); // Recursive for elements
+      } else if (child.nodeType === NodeApi.TEXT_NODE) {
+        const text = child.textContent;//.trim();
+        if (text) {
+          obj.children.push({ type: 'text', content: text }); // Text node
+        }
+      }
+    }
+
+    return obj;
+  }
+
+  // Parse the document body into a tree structure
+  const tree = [];
+  for (const child of document.body.childNodes) {
+    if (child.nodeType === NodeApi.ELEMENT_NODE) {
+      tree.push(elementToObject(child));
+    } else {
+      tree.push({ type: 'text', content: child }); // Text node
+    }
+  }
+
+  return tree;
+}
+
+function _htmlTreeToMarkdown(tree) {
+  const indentLevelStart = 0;
+  let indentLevel = indentLevelStart;
+  let list_stats = []
+  let insideAHREF = 0;
+  let insideDecorator = 0;
+  let insideHeading = 0;
+  let insideListType = "";
+
+  // Helper function to check for `font-weight > 400` in the `style` attribute
+  function isBold(node) {
+    if (node.attributes && node.attributes.style) {
+      const fontWeightMatch = node.attributes.style.match(/font-weight:\s*(\d+)/);
+      if (fontWeightMatch) {
+        const fontWeight = parseInt(fontWeightMatch[1], 10);
+        return fontWeight > 400; // Return true if font-weight > 400
+      }
+    }
+    return false; // Default to false
+  }
+
+  function isColor(node) {
+    if (node.attributes && node.attributes.style) {
+      const colorMatch = node.attributes.style.match(/color:\s*(#[0-9a-fA-F]+)/);
+      // when pasting html in, ignore certain colors, normalize to our style in that case
+      //  - white/black/greyscale colors
+      //  - certain other colors that certain apps default to 
+      if (colorMatch && colorMatch[1] && (colorMatch[1].match( /^#([0-9a-fA-F])\1{5}$/ ) == null) && colorMatch[1] != "#212529" && colorMatch[1] != "#434343") {
+        return colorMatch[1];
+      }
+    }
+    return false;
+  }
+
+  
+  function isMonospace(node) {
+    if (node.attributes && node.attributes.style) {
+      return /font-family:[^:;]*monospace/.test(node.attributes.style) || /font-family:[^:;]*Courier/.test(node.attributes.style);
+    }
+    return false; // Default to false
+  }
+
+  function isItalic(node) {
+    if (node.attributes && node.attributes.style) {
+      return /font-style:[^:;]*italic/.test(node.attributes.style);
+    }
+    return false; // Default to false
+  }
+
+  function isUnderscore(node) {
+    if (node.attributes && node.attributes.style) {
+      return /text-decoration:[^:;]*underline/.test(node.attributes.style);
+    }
+    return false; // Default to false
+  }
+
+  
+
+  function isBulletlessList(node) {
+    if (node.attributes && node.attributes.style) {
+      return /list-style:\s*none/.test(node.attributes.style) // Detect "list-style: none"
+    }
+    return false;
+  }
+  function getIndents(node) {
+    if (node.attributes && node.attributes.style) {
+      let m = node.attributes.style.match( /margin-left:\s*([\d.]+)(pt|px)/ );
+      let indentLevel = m ? m[1] : `${indentLevelStart+1}`;
+      const indent = parseFloat(indentLevel); // Get the numeric value in points
+      const increment = m ? (m[2] == "pt" ? 36 : 50) : 36; // google docs: starts at 72, then increments by 36pt corresponds to each level
+      return Math.floor(indent / increment);
+    }
+    return 0; // zero indent
+  }
+
+  function getListItemLevel(node) {
+    const ariaLevel = parseInt(node.attributes && node.attributes['aria-level'], 10);
+    if (Number.isInteger(ariaLevel) && ariaLevel > 0) return ariaLevel;
+
+    const style = node.attributes && node.attributes.style || '';
+    const offset = style.match(/(?:margin-left|padding-left|padding-inline-start):\s*([\d.]+)(pt|px)/i);
+    if (offset) {
+      const increment = offset[2].toLowerCase() === 'pt' ? 36 : 50;
+      return Math.max(1, Math.floor(parseFloat(offset[1]) / increment) + 1);
+    }
+
+    return Math.max(1, indentLevel - indentLevelStart);
+  }
+
+  function convertListIndexToMarkdown(node, index) {
+    function toRoman(num) {
+      const romanNumerals = [
+        ["M", 1000],["CM", 900],["D", 500],["CD", 400],
+        ["C", 100],["XC", 90],["L", 50],["XL", 40],
+        ["X", 10],["IX", 9],["V", 5],["IV", 4], ["I", 1],
+      ];
+      let result = "";
+      for (const [roman, value] of romanNumerals) {
+        while (num >= value) {
+          result += roman;
+          num -= value;
+        }
+      }
+      return result;
+    }
+
+    if (node.attributes && node.attributes.style) {
+      if (/list-style-type:\s*decimal/.test(node.attributes.style))
+        return index + 1 + "."; // Return index + 1 for decimal lists
+      else if (/list-style-type:\s*lower-alpha/.test(node.attributes.style))
+        return String.fromCharCode(97 + (index % 26)) + "."; // 97 is ASCII for 'a'
+      else if (/list-style-type:\s*upper-alpha/.test(node.attributes.style))
+        return String.fromCharCode(65 + (index % 26)) + "."; // 65 is ASCII for 'A'
+      else if (/list-style-type:\s*lower-roman/.test(node.attributes.style))
+        return toRoman(index + 1).toLowerCase() + "."; // Convert to lowercase Roman numeral
+      else if (/list-style-type:\s*upper-roman/.test(node.attributes.style))
+        return toRoman(index + 1) + "."; // Convert to uppercase Roman numeral
+    }
+    return insideListType == "ol" ?
+            index + 1 + "." : // Return index + 1 for ordered lists (decimal style)
+            "-"               // Return unordered list (bullet style)
+  }
+
+  // we like the greek letters to show in our urls...
+  const decodeURIGreekOnly = (str) => {
+    // Regex range: All Greek alphabetic characters (Ancient + Extended)
+    const greekAlphaRegex = /^[\u0370-\u0373\u0376-\u0377\u037A\u037B-\u037D\u037F\u0386\u0388-\u038A\u038C\u038E-\u038F\u0390\u0391-\u03A1\u03A3-\u03AB\u03AC-\u03CE\u03CF-\u03D7\u03D8-\u03EF\u03F0-\u03F5\u03F7-\u03FB\u03FC-\u03FF]+$/;
+    return str.replace(/(%[A-F0-9]{2})+/gi, (match) => {
+      try {
+        const decoded = decodeURIComponent(match);
+        return greekAlphaRegex.test(decoded) ? decoded : match;
+      } catch {
+        return match;
+      }
+    });
+  };
+
+  function convertChildrenToMarkdown(children) {
+    let markdown = '';
+    let previousWasListPart = false;
+    for (const child of children) {
+      const converted = convertNodeToMarkdown(child);
+      const isList = child && (child.tagName === 'ul' || child.tagName === 'ol');
+      const isListPart = isList || child && child.tagName === 'li';
+      const isEmptyText = child && child.type === 'text' && !String(child.content || '').trim();
+      if (isListPart && previousWasListPart) {
+        markdown = markdown.replace(/\n*$/, '\n');
+        markdown += converted.replace(/^\n+/, '');
+      } else {
+        markdown += converted;
+      }
+      if (!isEmptyText) previousWasListPart = isListPart;
+    }
+    return markdown;
+  }
+  
+
+  function convertNodeToMarkdown(node) {
+    let VERBOSE = false;
+    if (node.type === 'text') {
+      let retval = typeof node.content == "string" ? node.content :   // comes up in nodejs side
+                  node.content ? (                                    // comes up running in browser side
+                    typeof node.content.textContent == "string" ? node.content.textContent : 
+                    typeof node.content.nodeValue == "string" ? node.content.nodeValue : 
+                    typeof node.content.data == "string" ? node.content.data : 
+                    typeof node.content.wholeText == "string" ? node.content.wholeText : ""
+                  ) : "";
+      //VERBOSE && console.log( `TEXT:  "${retval}"` )
+      return retval.replace( /^[\n]+/, '' ).replace( /[\n]+$/, '' )  // Handle plain text nodes
+      // NOTE: dont use trim, too agressive for adjacent <> format nodes separated by space
+    }
+
+    // Check whether the node has `font-weight > 400` and wrap its content in `**`
+    const isNodeBold = isBold(node);
+    const isNodeMonospace = isMonospace(node);
+    const isNodeColored = isColor(node)
+    const isNodeItalic = isItalic(node) // if the style info makes this node italic.
+    const isNodeUnderscore = isUnderscore(node) // if the style info makes this node italic.
+
+    function applyDecoration( content, options = {} ) {
+      const delimiters =  (insideHeading == 0 && (isNodeBold || options.isNodeBold)) ? "**" :
+                          (isNodeItalic || options.isNodeItalic) ? "*" :
+                          (insideAHREF == 0 && (isNodeUnderscore || options.isNodeUnderscore)) ? "__" :
+                          ""
+      const applied_delimiters = (insideDecorator == 1) ? delimiters : ""
+      //VERBOSE && console.log( ` applyDecoration applied_delimiters:${applied_delimiters} insideHeading:${insideHeading} isNodeBold:${isNodeBold || options.isNodeBold} isNodeItalic:${isNodeItalic || options.isNodeItalic}`)
+      const c = content.replace(/^(\s*)/,`$1${applied_delimiters}`).replace(/(\s*)$/,`${applied_delimiters}$1`) // move the whitespace, delimiter must be butted up against the non-ws characters
+      //console.log( `c:'${c}'` )
+      return c.match(/\n/) ? content : c; // we dont apply decorators around multiline content
+    }
+
+    function sanitizeUrl( url ) {
+      return decodeURIGreekOnly( url.replace(/\(/g,'%28').replace(/\)/g,'%29').replace(/\*/g,'%2A') )
+    }
+    function sanitizeUrlTitle(input) {
+      // The goal here, in URL and IMG titles, is to leave any valid markdown formatting (bold/italic/underscore),
+      // and escape any other occurances of those same characters (*/_) to prevent the higher level markdownToHtml from matching them
+      // Consider TODO: we really only need to escape formatting chars (*/_) that do not have whitespace between them and \S characters... but works well enough for now.
+
+        // Split input into Markdown parts (bold, italics, underscore) and other text
+        const re = /(\*\*(?:[^*\n\s](?:[^*\n]*?[^*\n\s])?)\*\*|\*(?:[^*\n\s](?:[^*\n]*?[^*\n\s])?)\*|__(?:[^*\n\s](?:[^*\n]*?[^*\n\s])?)__)/g;
+        const parts = input.split(re);
+        // console.log( parts );
+
+        // Function to escape unmatched characters
+        const escapeUnmatchedCharacters = (text) => {
+            return text.replace(/\*/g, '&ast;')
+                      .replace(/_/g, '&#95;')
+                      .replace(/\[/g, '&lbrack;') // we can't have other brackets inside of URL titles [[title]]() doesn't parse!
+                      .replace(/\]/g, '&rbrack;') // we can't have other brackets inside of URL titles [[title]]() doesn't parse!
+        };
+
+        // Process each part, preserving Markdown formatting in recognized patterns
+        return parts.map(part => {
+            // If part matches well-formed Markdown, return it unaltered
+            if (/^(\*\*(?:[^*\n\s](?:[^*\n]*?[^*\n\s])?)\*\*|\*(?:[^*\n\s](?:[^*\n]*?[^*\n\s])?)\*|__(?:[^*\n\s](?:[^*\n]*?[^*\n\s])?)__)$/.test(part)) {
+                return part;
+            }
+            // Otherwise, escape unmatched formatting characters
+            return escapeUnmatchedCharacters(part);
+        }).join('');
+    }
+    // tests:
+    // function sanitizeUrlTitle_test(markdown, expectedMarkdown) {
+    //   const html = sanitizeUrlTitle( markdown, "/base" )
+    //   if (html != expectedMarkdown) {
+    //     console.log( "[markdown.js] test failed" )
+    //     console.log( "-------markdown-------" )
+    //     console.log( markdown )
+    //     console.log( "-------Generated HTML-------" )
+    //     console.log( `'${html}'` )
+    //     console.log( "-------Expected HTML-------" )
+    //     console.log( `'${expectedMarkdown}'` )
+    //     return false;
+    //   }
+    //   return true;
+    // }
+    // sanitizeUrlTitle_test(
+    //   "test *string* with **bold** and with unmatched * and* _ underscores_ and __double underscores__",
+    //   "test *string* with **bold** and with unmatched &ast; and&ast; &#95; underscores&#95; and __double underscores__" )
+    // sanitizeUrlTitle_test(
+    //   "*hello* **bold** __underscore__ * _ ** random *thing * is **things ** yeah",
+    //   "*hello* **bold** __underscore__ &ast; &#95; &ast;&ast; random &ast;thing &ast; is &ast;&ast;things &ast;&ast; yeah" )
+
+    // Handle specific HTML tags
+    function getSwitchResult() {
+    switch (node.tagName) {
+      case 'h1':
+      case 'h2':
+      case 'h3':
+      case 'h4':
+      case 'h5':
+      case 'h6': {
+        const level = parseInt( node.tagName[1] );
+        insideHeading++
+        const content = `${"#".repeat(level)} ${node.children.map(convertNodeToMarkdown).join('')}\n`;
+        insideHeading--
+        return content
+      }
+      case 'p': {
+        const content = node.children.map(convertNodeToMarkdown).join('');
+        if (isNodeMonospace) {
+          return `\`\`\`\n${content}\n\`\`\`\n\n`;
+        }
+        let levels = getIndents(node)
+        let retval = '\n' + `${'}'.repeat(levels)}${levels>0?' ':''}${applyDecoration( content )}\n`;
+        if (indentLevel >= (indentLevelStart+1)) {
+          retval = retval.replace(/^[\s\n]+/g, '').replace(/[\s\n]+$/g, '').replace(/\n/g, '')
+        }
+        return retval;
+      }
+      case 'b':
+      case 'strong': {
+        insideDecorator++
+        const content = applyDecoration(convertChildrenToMarkdown(node.children), {isNodeBold: true});
+        insideDecorator--
+        return content;
+      }
+      case 'i':
+      case 'em': {
+        insideDecorator++
+        const content = applyDecoration( node.children.map(convertNodeToMarkdown).join(''), {isNodeItalic: true} );
+        insideDecorator--
+        return content;
+      }
+      case 'u': {
+        insideDecorator++
+        const content = applyDecoration( node.children.map(convertNodeToMarkdown).join(''), {isNodeUnderscore: true} );
+        insideDecorator--
+        return content;
+      }
+      case 'blockquote': {
+        indentLevel++; // Increase indentation level for nested blockquotes
+        list_stats.push( {items:-1} )
+        const content = `\n${'>'.repeat(indentLevel)} ` + node.children.map(convertNodeToMarkdown).join('').trim() + `\n`;
+        list_stats.pop();
+        indentLevel--; // Decrease indentation level after processing the blockquote
+        return content;
+      }
+      case 'ul': {
+        const previousListType = insideListType;
+        insideListType="ul"
+        indentLevel++; // Increase indentation level for nested lists
+        list_stats.push( {items:-1} )
+        const content = convertChildrenToMarkdown(node.children).replace(/^[\n]+/g, '').replace(/[\n]+$/g, '') + '\n';
+        list_stats.pop();
+        indentLevel--; // Decrease indentation level after processing the list
+        insideListType = previousListType;
+        if (isBulletlessList(node)) {
+          return `\n${'}'.repeat(indentLevel)}${content}\n`;
+        } else {
+          return `\n${content}`;
+        }
+      }
+      case 'ol': {
+        const previousListType = insideListType;
+        insideListType="ol"
+        indentLevel++; // Increase indentation level for nested lists
+        list_stats.push( {items:-1} )
+        const content = convertChildrenToMarkdown(node.children).replace(/^[\n]+/g, '').replace(/[\n]+$/g, '') + '\n'
+        list_stats.pop();
+        indentLevel--; // Decrease indentation level after processing the list
+        insideListType = previousListType;
+        return `\n${content}`;
+      }
+      case 'li':
+        // keep in mind: nesting ul under my li...
+        let content = node.children.map(convertNodeToMarkdown).join('')
+        let bullet = convertListIndexToMarkdown(node, list_stats.length == 0 ? 0 : (++list_stats[list_stats.length-1].items) )
+        const listItemLevel = getListItemLevel(node);
+        return `${' '.repeat(1 + (listItemLevel - 1) * 2)}${bullet} ${content}\n`;
+      case 'a': {
+        insideAHREF++
+        const href = node.attributes.href || '';
+        const title = node.children.map(convertNodeToMarkdown).join('');
+        const content = `[${sanitizeUrlTitle( applyDecoration( title ) )}](${sanitizeUrl(href)})`;
+        insideAHREF--
+        return content;
+      }
+      case 'img':
+        const src = node.attributes.src || '';
+        const alt = node.attributes.title || node.attributes.alt || '';
+        return `![${sanitizeUrlTitle(applyDecoration( alt ))}](${sanitizeUrl(src)})`;
+      case 'code':
+        return `\`${node.children.map(convertNodeToMarkdown).join('')}\``;
+      case 'pre':
+        return '\n' + `\`\`\`\n${node.children.map(convertNodeToMarkdown).join('')}\n\`\`\`\n`;
+      case 'br':
+        return `\n`;
+      case 'table': {
+        const rows = node.children.map(convertNodeToMarkdown).join('\n');
+        return `${rows}\n`;
+      }
+      case 'thead': {
+        const cells = node.children.map(convertNodeToMarkdown).join(' | ');
+        return `${cells}${'|---'.repeat(cells.split('|').length-2)+'|'}`;
+      }
+      case 'tr': {
+        const cells = node.children.map(convertNodeToMarkdown).join(' | ');
+        return `| ${cells} |\n`;
+      }
+      case 'td': {
+        const content = node.children.map(convertNodeToMarkdown).join('').trim();
+        return applyDecoration( content.replace(/\n+/g, '<br>') );
+      }
+      case 'th': {
+        const content = node.children.map(convertNodeToMarkdown).join('').trim();
+        return applyDecoration( content );
+      }
+      case 'span': {
+        let content = node.children.map(convertNodeToMarkdown).join('');
+        // google docs has links colored as #1155cc, so ignore link coloring when = to the default color of blue here.
+        content = (isNodeColored && (insideAHREF == 0 || isNodeColored != "#1155cc")) ? `<span style="color:${isNodeColored}">` + content + `</span>` : content
+        if (isNodeMonospace) {
+          // Convert to inline code
+          content = content.replace( /\n/g, '\n' ).replace(/^(.*)$/, '`$1`')
+          return content;
+        }
+        let levels = getIndents(node)
+        return `${'}'.repeat(levels)}${levels>0?' ':''}${applyDecoration( content )}`;
+      }
+      case 'hr': {
+        return '\n' + '---------\n';
+      }
+      case 'div': {
+        let levels = getIndents(node)
+        if (levels>0) {
+          indentLevel++; // Increase indentation level for nested blockquotes
+          list_stats.push( {items:-1} )
+        }
+        // assume divs are block level (requires a newline).
+        const content = `\n${'}'.repeat(levels)}${levels>0?' ':''}` + applyDecoration(node.children.map(convertNodeToMarkdown).join(''));
+        if (levels>0) {
+          list_stats.pop();
+          indentLevel--; // Decrease indentation level after processing the blockquote
+        }
+        return content;
+      }
+      case 'svg':
+        return '';
+      default: {
+        // Default fallback: Render children only
+        let levels = getIndents(node)
+        if (levels>0) {
+          indentLevel++; // Increase indentation level for nested blockquotes
+          list_stats.push( {items:-1} )
+        }
+        const content = `${levels>0 ? '\n':''}${'}'.repeat(levels)}${levels>0?' ':''}` + applyDecoration(convertChildrenToMarkdown(node.children));
+        if (levels>0) {
+          list_stats.pop();
+          indentLevel--; // Decrease indentation level after processing the blockquote
+        }
+        return content;
+      }
+    }
+    }
+    const result = getSwitchResult().replace( /^\n+/, '\n' ).replace( /\n+$/, '\n' );
+    VERBOSE && console.log( `<${node.tagName}> result:'${result.replace(/\n/g,'\\n')}'` )
+    return result;
+  }
+
+  //console.log("tree.map(convertNodeToMarkdown).join('');")
+  // Iterate through the tree and convert each node to Markdown
+  return convertChildrenToMarkdown(tree);
+}
+
+function htmlToMarkdown( str ) {
+  //console.log("htmlToMarkdown", str)
+  if (str == "<p><br></p>") str = ""; // quill does this... filter out empty document produced by quill editor...
+  const htmlTree = _parseHTMLToTree(str);
+  let markdown_str = _htmlTreeToMarkdown( htmlTree );
+  return markdown_str;
+}
+
+function splitTopicQueryHash(url) {
+  const match = String(url || '').match(/^([^?#]*)(?:\?([^#]*))?(?:#(.*))?$/);
+  return match ? [match[1] || '', match[2] || '', match[3] || ''] : ['', '', ''];
+}
+
+/**
+ * Extracts the first image URL (markdown or HTML) within the first N lines of markdown.
+ *
+ * @param {string} markdown - Markdown text to search.
+ * @param {number} maxLines - How many lines from the top to include in search.
+ * @returns {string|undefined} - First image URL found, or undefined.
+ */
+function extractFirstImage(markdown, maxLines) {
+  if (typeof markdown !== 'string' || typeof maxLines !== 'number') {
+    throw new TypeError('Invalid arguments: (markdown: string, maxLines: number)');
+  }
+
+  // Regex to grab only the first N lines (handles \r\n or \n)
+  const topNRegex = new RegExp(`^(?:.*(?:\\r?\\n|$)){0,${maxLines}}`);
+  const limitedTextMatch = markdown.match(topNRegex);
+  if (!limitedTextMatch) return undefined;
+  let limitedText = limitedTextMatch[0];
+
+  // Cut everything after the 2nd heading (including the 2nd heading itself)
+  if (limitedText.match(/(^|\n)#+ [^\n]*\n/))  // if there's at least one heading
+      limitedText = limitedText
+        .replace(/^[\s\S]*?^#+ [^\n]*\n/m, '')    // Remove up to the first heading line
+        .replace(/(?!\n)#+ [\s\S]*$/, '');       // Remove everything from the next heading onward
+
+  // Combined regex:
+  // - Markdown: ![alt](url)
+  // - HTML: <img src="url" ...> or <img src='url' ...>
+  // - intentionally never match absolute URLs (http:// or https://)
+  const imageRegex = /!\[[^\]]*\]\(([^)]+)\)|<img[^>]+src\s*=\s*["']([^"']+)["']/i;
+
+  const match = limitedText.match(imageRegex);
+
+  // Return whichever capture group matched (Markdown or HTML)
+  const foundimage = match ? (match[1] || match[2]) : undefined;
+  return foundimage && foundimage.match(/^\//) && foundimage; // only return relative URLs
+}
+
+const htmlToMarkdownApi = { htmlToMarkdown, splitTopicQueryHash, extractFirstImage };
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = htmlToMarkdownApi;
+}
+if (global) {
+  global.HTMLToMarkdownJS = htmlToMarkdownApi;
+}
+})(typeof globalThis !== 'undefined' ? globalThis : this);
