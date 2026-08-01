@@ -22,6 +22,11 @@ The build produces three self-contained classic JavaScript files:
 - `dist/markdown-editor.js` also contains and registers `<markdown-wysiwyg-editor>`.
 - `dist/htmlToMarkdown.js` is the optional, browser-oriented HTML-to-Markdown converter.
 
+`dist/` is generated and committed so browser and template consumers can use
+the repository directly. Run the build and commit updated bundles whenever
+their source files change. The `prepack` script also rebuilds them before npm
+creates a package.
+
 Include `style.css` for the default code-overflow, permalink-icon, and invisible-quote presentation.
 
 HTML-to-Markdown conversion is not part of either core bundle and is not loaded
@@ -275,6 +280,79 @@ The core public browser globals are `MarkdownDefaultRules`, `MarkdownJS`, and
 External JavaScript uses `<script src="...">`. A `<link src="...">` element
 does not load or execute JavaScript.
 
+## Rule-driven editor scope
+
+> **Important:** parser rules are not editor plug-ins. Adding a Markdown type
+> to `default_rules.js` does **not** automatically give that type construction,
+> editing, keyboard, selection, conversion, or serialization behavior in the
+> WYSIWYG editor. A new rule changes the parser and renderer; it does not add or
+> modify the editor's JavaScript implementation.
+
+The Markdown parser and HTML renderer are data-driven by the supplied rules.
+The WYSIWYG editor also reads substantial UI metadata from each rule's `editor`
+object, including labels, variants, toolbar order, keyboard shortcuts, fence
+markers, CSS classes, block tags, Enter behavior, and broad behavior type.
+
+The editor is not an automatic editor generator for an arbitrary grammar. It
+implements a fixed behavior vocabulary: containers, text blocks, code blocks,
+quotes, lists, tables, inline formats, and inline objects. Commands such as
+link/image dialogs, color application, list indentation, table mutation, and
+block conversion have JavaScript implementations in
+`markdown_wysiwyg_editor.js`. Serialization also understands the corresponding
+DOM structures.
+
+Consequently, making a new Markdown type fully editable currently requires two
+separate changes:
+
+1. defining its grammar, AST captures, and renderer in the rules;
+2. separately changing `markdown_wysiwyg_editor.js` to support that type, unless
+   the rule can use an editor behavior that is already implemented.
+
+That editor change may need AST-to-DOM construction, DOM-to-Markdown
+serialization, block conversion, Enter behavior, selection behavior, toolbar
+commands, and regression tests. Merely adding `editor` metadata to a new rule
+cannot create those implementations.
+
+For existing types:
+
+- changing labels, variants, markers, tags, shortcuts, ordering, templates, or
+  other metadata within an existing behavior generally updates the editor;
+- adding a new rule can reuse an already implemented editor behavior when its
+  editing semantics and DOM representation genuinely match that behavior;
+- adding a genuinely new block/inline interaction or DOM representation
+  requires a new editor behavior or command implementation;
+- a parser rule without compatible `editor` metadata remains parseable and
+  renderable but is not necessarily directly authorable through a toolbar.
+
+The browser interaction code cannot be inferred from a regular expression or
+an HTML rendering template. However, the present boundary is still a real
+extension limitation: the rules are the parser's source of truth, but they are
+not yet a complete editor extension API. Developers should treat this as a
+customizable Markdown engine with an editor for its supported behavior
+vocabulary, not as an editor that automatically supports arbitrary new rules.
+
+A future goal is to turn the rule `editor` data into a real extension API, so a
+new type can provide its editing hooks alongside its grammar instead of
+requiring hardcoded changes throughout `markdown_wysiwyg_editor.js`. That API
+does not exist yet.
+
+## CommonMark compatibility
+
+This project is **not CommonMark-conformant** and should not be presented as a
+drop-in CommonMark or GitHub Flavored Markdown implementation. It implements a
+custom Markdown dialect with intentional extensions and different parsing
+semantics.
+
+As a diagnostic baseline, the renderer passed 125 of the 652 CommonMark 0.31.2
+examples after lenient normalization of superficial HTML differences. That is
+about 19%, not a conformance claim. Important differences include indented and
+fenced code behavior, Setext headings, reference links, delimiter/escape rules,
+HTML blocks, list continuation and nesting, thematic breaks, and soft line
+breaks.
+
+See the [CommonMark 0.31.2 specification](https://spec.commonmark.org/0.31.2/)
+and its [official JSON examples](https://spec.commonmark.org/0.31.2/spec.json).
+
 ## Renderer configuration
 
 `markdownToHtml` accepts a renderer-options object. Heading IDs and clickable
@@ -330,22 +408,17 @@ Each of those children rules have a parse type, and data for that part (like lin
 - normal blocks are matching line by line as long as the same type, they'll be collected together as a single block of that type, so a block rule has a regex which matches a line, or lines, but the regex must be written so that it matches always from start of a line to the end of some line later.
 - fence blocks are funny, when the special sequence is detected, using a single line regex that matches for example (?<=(^|\n))(---(\n|$)) and once matched the engine then pulls the rest of that block text up to another match of the same regex.
 
-## Default (system) Rules object:
+## Default rules object
 
-- the objective is to data drive the engine with rules, NOT to bake rules into the engine!!!
-  - todo: write a complete list expected for markdown, look at parse types below for inspiration
-- document (block type; null regex)
-- heading (block type)
-- code fence (fence type)
-- list (block type)
-- list item (block type)
-- blank lines (block type)
-- text lines (block type)
-- other fence like: box --- (fence type)
-- table lines block (block type)
-- table line (block type)
-- block quote lines (block type)
-- inline rules..... todo..... (formatting... links images .... etc) (inline type)
+`default_rules.js` defines the document grammar, block and inline child order,
+capture mappings, renderer templates, and editor metadata. Its block rules
+cover headings, blank lines, TOC directives, fenced boxes and code, horizontal
+rules, ordered and unordered lists, visible and invisible blockquotes, tables,
+and paragraphs. Inline rules cover text, strong/emphasis/underline, code,
+colors, HTML, links, images, variables, automatic links, and line breaks.
+
+Applications can clone or replace this schema rather than modifying the parser
+engine for every Markdown dialect change.
 
 ## Parse Types in the rules
 
@@ -457,3 +530,7 @@ The parser and renderer were developed around the following requirements.
 - Generated convenience pipelines must agree with their explicit equivalents;
   for example, `markdownToHtml(source)` must match
   `astToHTML(markdownToAST(source))`.
+
+## License
+
+MIT. See `LICENSE`.

@@ -1,1 +1,7 @@
-node_modules/**
+node_modules/
+
+# Generated megatest/debug artifacts
+megatest.html
+megatest_ast.json
+test_headings.html
+test_headings_ast.json
