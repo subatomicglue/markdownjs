@@ -373,16 +373,87 @@ a document test with custom rules where documents only have blocks and no childr
 Recursion block tests, taking document splits to child blocks within the parent block - check ast.
 Inline tests on simple text to test formatting combinations and gotchas and correctness.
 
-## Notes:
+## Design requirements and constraints
 
-Lines and Blocks (of lines) are the same, so we don't need a Line type at all, a line is a block!. Block is just one line and block is also N of those lines. The number of lines should be constrained by the regex, right? No need for an engine change per line vs block???? I didn't think so... I think they're all blocks. Heading is a block, multiple lines of blanks is a block, etc.
+The parser and renderer were developed around the following requirements.
 
-blocks as opposed to inline or the fence (which is just a block, see below). We only need two types, inline and block. Boom
+### Unified block model
 
-You don't need a single line flag. And you don't need to match line by line. Instead just match using the regex, and if a match, update the cursor. You know, like my original notes specify above :-p.
+- The grammar has two parsing categories: block and inline.
+- A block may consume one line or many lines. A separate line-node type and a
+  single-line flag are unnecessary.
+- Headings, paragraphs, blank-line runs, lists, blockquotes, tables, code
+  fences, and custom fenced boxes are all block rules.
+- The amount of source consumed by a block is defined by that rule's regular
+  expression rather than by special behavior in the parser engine.
 
-And fences like --- actually a fence that matches from the start won't have nesting problems!!! So fences can be blocks too! We will never allow nested fences of the same design. The regex will look for --- and then the next --- easy. Nested fences would only allow other fences, like === or ''' or whatever... so fences can be blocks too
+### Cursor-based parsing
 
-each rule could have special variables to stick captures into. Like capture: { var1: 1, var2: 0 }, which would dump the match[1] into the ast node's var1. the ast to html function would be able to use these for more efficient processing
+- Parse the original source buffer directly; do not split it into lines before
+  matching because doing so would prevent rules from recognizing multiline
+  structures.
+- At each cursor position, try the current container rule's children in their
+  declared order.
+- A successful rule consumes its complete match, advances the cursor by that
+  length, and recursively parses its captured content with its child rules.
+- Sticky matching keeps every rule anchored at the current cursor and avoids
+  accidental matches later in the source.
+- If no permitted rule matches at the cursor, parsing must fail clearly rather
+  than silently skipping source text.
 
-there should be unit tests for all the rules, to ensure they match complete lines, and not partial.... from after (^ or \n) to (\n or $) basically.
+### Complete block boundaries
+
+- Block rules must consume complete source lines or complete multiline regions,
+  normally bounded by the beginning/end of the document or a newline.
+- Rules must not accept a partial prefix of a line and leave unexplained text
+  behind.
+- Paragraph fallback rules are responsible for ordinary text that does not
+  match a more specific block rule.
+
+### Fenced blocks and nesting
+
+- Fenced constructs use the same block engine; they are not a separate parser
+  category.
+- An opening marker consumes through the next matching closing marker.
+- A fenced block cannot contain another fence using the same marker because the
+  first matching marker closes the outer block.
+- Different fence markers may nest because their opening and closing markers
+  remain unambiguous.
+- The editor prevents selecting a fence marker already used by an ancestor.
+
+### Data-driven grammar and AST
+
+- Grammar behavior belongs in the rules schema wherever practical instead of
+  being hardcoded into the engine.
+- Rule order, regular expressions, child rules, capture mappings, HTML
+  templates, and editor metadata are defined by rule data.
+- A rule's capture map copies regular-expression groups into named AST capture
+  fields. Renderers and editors consume those named values without reparsing
+  the original source.
+- AST nodes retain their type, parse category, raw match, content, captures,
+  and recursively parsed children.
+
+### Rendering and editor separation
+
+- Markdown is the source of truth.
+- `markdownToAST`, `astToHTML`, and `markdownToHtml` remain independently usable
+  pipeline stages.
+- Renderer-only presentation, such as heading permalinks, is configurable and
+  is not exposed as editable content in the WYSIWYG editor.
+- The editor creates structurally valid Markdown and uses the same grammar data
+  for supported block and inline controls.
+- HTML-to-Markdown conversion remains an optional companion feature rather than
+  a dependency of the parser or renderer.
+
+### Verification requirements
+
+- Every default rule requires focused tests for successful matches, boundary
+  behavior, recursion, AST captures, and rendered output.
+- Block-rule tests must verify that complete lines or regions are consumed and
+  that partial-line matches are rejected.
+- Nested blocks, mixed block transitions, inline delimiter boundaries, Unicode,
+  URLs, clipboard HTML, and round-trip-sensitive editor behavior require
+  regression coverage.
+- Generated convenience pipelines must agree with their explicit equivalents;
+  for example, `markdownToHtml(source)` must match
+  `astToHTML(markdownToAST(source))`.
